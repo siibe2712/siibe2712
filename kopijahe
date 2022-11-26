@@ -1,0 +1,1357 @@
+#!/bin/sh
+# shellcheck disable=3010
+
+# Script untuk login otomatis di jaringan wifi.id dan WMS
+# Oleh: KopiJahe (https://kopijahe.my.id)
+
+# shellcheck disable=SC1091
+# Muat library network OpenWrt
+. /lib/functions/network.sh
+
+# Buat berkas baru untuk menyimpan konfigurasi autologin
+touch /etc/config/kopijahe
+
+# variabel advancedmode="true" adalah penanda agar
+# fungsi loop autologin tidak dijalankan
+
+versi() {
+	# Fungsi versi aplikasi
+	# Tentukan versi dengan mengubah variabel "ver"
+	ver="2.2.7"
+}
+
+bantuan() {
+	versi
+	echo "Aplikasi autologin KopiJahe"
+	echo "http://kopijahe.my.id/"
+	echo "Versi aplikasi: $ver"
+	echo ""
+	echo "Penggunaan: kopijahe [-b] [-i] [-u \"<username>\"] [-p \"<password>\"] [-l \"<yes|no>\"] [-c \"<provider>\"] [-v \"<varian>\"] [-m <nomor urut autologin>] [-a]"
+	echo "-a: deteksi otomatis jaringan wifi.id atau wms dan turunannya (harus dalam keadaan terkoneksi namun logout dari jaringan)"
+	echo "-b: unduh versi script terbaru"
+	echo "-c: masukkan penyedia layanan cek captive portal dengan 2 tanda kutip"
+	echo "-d: masukkan URL halaman landing (bisa digunakan sebagai pengganti opsi \"-a\" jika deteksi otomatis tidak berhasil)"
+	echo "-f: masukkan berkas login_file.txt dengan 2 tanda kutip (misal: \"\etc\login_file.txt\")"
+	echo "-h: tampilkan halaman ini"
+	echo "-i: instalasi aplikasi autologin"
+	echo "-k: matikan semua proses autologin KopiJahe"
+	echo "-l: konfigurasi load-balance, diisi \"yes\" atau \"no\", lalu masukkan interface yang akan digunakan (misal: wwan, wwan1)"
+	echo "-s: masuk mode auto-reconnect seamless"
+	echo "-t: tes dan tampilkan semua konfigurasi aplikasi"
+	echo "-u: masukkan username yang digunakan untuk login dengan 2 tanda kutip"
+	echo "-m: multi-autologin, masukkan angka jumlah autologin akan yang digunakan"
+	echo "-o: lakukan logout secara manual (supaya akun tidak tersangkut)"
+	echo "-p: masukkan password yang digunakan untuk login dengan 2 tanda kutip"
+	echo "-v: masukkan varian jaringan wifi yang digunakan dengan 2 tanda kutip"
+	echo "-w: masukkan lama waktu pengulangan dalam satuan detik (default: 10 detik)"
+	echo "-x: masuk ke mode debug (untuk keperluan analisa jika gagal autologin)"
+	echo "-z: lakukan login secara manual (untuk keperluan analisa jika gagal autologin)"
+	echo ""
+	echo "Varian jaringan yang didukung:"
+	echo "\"wifi.id\", \"wms\", \"wms-lite\", \"kampus\", \"smartbisnis\", \"sso\", \"rumah-sakit\", \"wico\", \"grosirbersama\", \"internetku\", \"gift\", \"starwifi\", \"pegadaian\""
+	echo "Coba gunakan \"komunitas-generik\" jika komunitas atau kampus anda belum didukung secara langsung oleh script."
+	echo ""
+	echo "Penyedia layanan cek captive portal yang didukung:"
+	echo "\"kopijahe\" (default), \"kopijahe2\", \"firefox\", \"google\", \"google2\", \"apple\", \"apple2\", \"microsoft\", \"microsoft2\", \"xiaomi\", \"httpforever\", \"neverssl\", \"ubuntu\", \"archlinux\"""\"kopijahe\" (default), \"firefox\", \"google\", \"google2\", \"apple\", \"apple2\", \"microsoft\", \"microsoft2\", \"xiaomi\", \"httpforever\", \"neverssl\", \"ubuntu\", \"archlinux\", \"examplecom\""
+	echo ""
+	echo "=========================================================================="
+	echo ""
+	echo "Contoh penggunaan:"
+	echo ""
+	echo "Penggunaan untuk 1 autologin (deteksi otomatis URL halaman landing):"
+	echo "kopijahe -l \"no\" -u \"halo@kopijahe.my.id\" -p \"en4kbang3t\" -v \"wifi.id\" -a"
+	echo ""
+	echo "Penggunaan untuk 1 autologin (masukkan manual URL halaman landing):"
+	echo "kopijahe -l \"no\" -u \"halo@kopijahe.my.id\" -p \"en4kbang3t\" -v \"wifi.id\" -d"
+	echo ""
+	echo "Penggunaan untuk 2 autologin:"
+	echo "kopijahe -m 1 -l \"yes\" -u \"halo@kopijahe.my.id\" -p \"en4kbang3t\" -v \"smartbisnis\" -a"
+	echo "kopijahe -m 2 -l \"yes\" -u \"hola@kopijahe.my.id\" -p \"n1kmats3kali\" -v \"smartbisnis\" -a"
+	echo ""
+	echo "Penggunaan untuk 1 auto-reconnect seamless (diletakkan di berkas /etc/rc.local):"
+	echo "kopijahe -s"
+	echo ""
+	echo "Penggunaan dengan berkas tangkapan login CURL (login_file.txt) via Google Chrome (diletakkan di berkas /etc/rc.local):"
+	echo "kopijahe -f \"/etc/login_file.txt\""
+	echo ""
+	echo "Login manual jika autologin gagal (untuk keperluan analisa jika gagal autologin):"
+	echo "kopijahe -x -z"
+	echo "kopijahe -x -m 1 -z"
+	echo "kopijahe -x -m 2 -z"
+	exit 0
+}
+
+detectconfig() {
+	# Fungsi cek pengaturan
+	
+	# Cek apakah belum ada pengaturan autologin sebelumnya
+	# Jika benar, maka:
+	# shellcheck disable=SC2086
+	if [[ "$advancedmode" = "true" ]] && [[ "$(uci -q show kopijahe.@autologin[$multiautologincfg])" = "" ]]; then
+		# Tambahkan pengaturan baru
+		uci add kopijahe autologin
+	fi
+}
+
+osversioncheck() {
+	# Fungsi cek versi rilis LEDE/OpenWrt
+	osversion="$(grep VERSION_ID /etc/os-release | awk -F'[=]' '{print $2}' | awk -F'[".]' '{print $2}')"
+	export osversion
+	
+	# Jika rilis OpenWrt adalah 14.x atau 15.x, maka beritahu pengguna bahwa versi rilis tidak didukung oleh aplikasi ini
+	if [[ "$osversion" = "14" ]] || [[ "$osversion" = "15" ]]; then
+		echo "Rilis openwrt di bawah versi 17.01 tidak didukung"
+		exit 1
+	fi
+	
+	# Jika digunakan untuk STB (board sunxi), maka anggap versi os sama dengan LEDE 17.01
+	# Karena rata-rata STB apabila di-reboot, maka jam akan terpaut jauh daripada dunia nyata
+	# Cek board OpenWrt
+	openwrt_board="$(grep OPENWRT_BOARD /etc/os-release | awk -F'["=/]' '{print $3}')"
+	
+	# Jika tidak menggunakan parameter OPENWRT_BOARD, coba parameter LEDE_BOARD
+	if [[ "$openwrt_board" = "" ]]; then
+		openwrt_board="$(grep LEDE_BOARD /etc/os-release | awk -F'["=/]' '{print $3}')"
+	fi
+	
+	# Jika digunakan untuk STB (board sunxi), maka anggap versi os sama dengan LEDE 17.01
+	if [[ "$openwrt_board" = "sunxi" ]]; then
+		osversion="17"
+		export osversion
+	fi
+}
+
+randommaccheck() {
+	# Jika tidak terdeteksi perangkat memiliki MAC address acak, maka:
+	if [[ "$detectrandommac" = "" ]]; then
+		# Tentukan MAC address dari berkas pengaturan
+		clientmac="$(uci -q get kopijahe.@autologin["$multiautologinnum"].clientmac)"
+	# Jika terdeteksi MAC address acak, maka:
+	else
+		# Tentukan MAC address dari hasil ifconfig
+		clientmac="$(ifconfig "$wandevice" | grep HWaddr | awk -F'[ ]' '{print $10}')"
+	fi
+}
+
+mwan3check() {
+	# Fungsi cek mwan3
+	# Untuk mengecek apakah mwan3 terpasang atau tidak
+	
+	checkmwan3="$(mwan3 --help 2> /dev/null)"
+	
+	# Jika perintah sebelumnya menghasilkan kode 127, maka
+	if [[ "$?" = "127" ]]; then
+		# Tentukan bahwa mwan3 tidak terpasang
+		checkmwan3="no"
+	# Jika tidak, maka:
+	else
+		# Tentukan bahwa mwan3 terpasang
+		checkmwan3="ok"
+	fi
+	
+	# Jika mwan3 terpasang, cek juga apakah mwan3 yang terpasang memiliki fungsi "use" atau tidak
+	
+	if [[ "$checkmwan3" = "ok" ]]; then
+		checkmwan3use="$(mwan3 use 2> /dev/null)"
+	fi
+	
+	if [[ "$checkmwan3use" = "no command specified for mwan3 use" ]]; then
+		# Tentukan bahwa mwan3 memiliki fungsi "use"
+		checkmwan3use="ok"
+	else
+		# Tentukan bahwa mwan3 tidak memiliki fungsi "use"
+		checkmwan3use="no"
+	fi
+}
+
+multiautologin() {
+	# Fungsi multi-autologin
+	# Tentukan nomor konfigurasi yang akan digunakan
+	# sesuai dengan input dari pengguna
+	#
+	# Jika tidak ada input dari pengguna, atau
+	# input tidak valid (nol, atau bukan angka), maka:
+	if [[ "$inputmultiautologin" = "0" ]] || [[ "$inputmultiautologin" = "" ]]; then
+		# Tentukan bahwa konfigurasi pertamalah
+		# yang akan dipakai
+		inputmultiautologin="1"
+	fi
+	# Karena urutan konfigurasi dimulai dari angka 0
+	# maka, kurangi hasil dari input pengguna
+	multiautologincfg="$((inputmultiautologin-1))"
+	detectconfig
+	
+	# shellcheck disable=SC2086
+	if [[ "$(uci -q get kopijahe.@autologin[$multiautologincfg].multi_autologin)" = "" ]]; then
+		uci set kopijahe.@autologin["$multiautologincfg"].multi_autologin="$multiautologincfg"
+		uci commit kopijahe
+	fi
+	
+	# shellcheck disable=SC2086
+	multiautologinnum="$(uci -q get kopijahe.@autologin[$multiautologincfg].multi_autologin)"
+}
+
+install() {
+	# Fungsi instalasi aplikasi
+	# Beritahu pengguna bahwa proses instalasi dimulai
+	advancedmode="true"
+	multiautologin
+	versi
+	echo "Memasang Autologin KopiJahe..."
+	# Kopi berkas ke folder /usr/bin/
+	cp -f "$0" /usr/bin/kopijahe
+	# Beri izin eksekusi
+	chmod +x /usr/bin/kopijahe
+	# Beritahu pengguna versi autologin saat ini
+	echo "Versi aplikasi autologin saat ini: $ver"
+	
+	# Cek apakah curl sudah tersedia di sistem
+	checkcurl="$(curl --version)"
+	# Jika hasil cek kosong, berarti curl belum tersedia, maka:
+	if [[ "$checkcurl" = "" ]]; then
+		# Perbarui daftar aplikasi
+		opkg update
+		# Unduh dan pasang curl
+		opkg install curl
+	fi
+}
+
+killkopijahe() {
+	# Fungsi matikan aplikasi
+	advancedmode="true"
+	# Cari tahu PID dari semua proses kopijahe (kecuali yang menjalankan fungsi ini), lalu matikan
+	pgrep -f "kopijahe" | grep -v "^$$" | xargs kill
+}
+
+update() {
+	advancedmode="true"
+	versi
+	# Fungsi pembaruan aplikasi autologin
+	# Unduh versi terbaru dari github
+	# dan letakkan hasilnya di folder /tmp terlebih dahulu
+	curl --silent https://raw.githubusercontent.com/kopijahe/wifiid-openwrt/master/scripts/kopijahe -o /tmp/kopijahe-update
+	# Beritahu pengguna versi autologin sebelum diperbarui
+	echo "Versi aplikasi autologin sebelumnya: $ver"
+	# Lakukan instalasi aplikasi
+	sh /tmp/kopijahe-update -i
+	# Bersihkan sisa berkas update
+	rm /tmp/kopijahe-update
+	# Matikan dulu semua proses autologin KopiJahe
+	killkopijahe
+	# Jalankan kembali proses autologin
+	sh /etc/rc.local
+}
+
+generaterandomid() {
+	# Buat 2 pasang karakter acak untuk keperluan login di jaringan WMS
+	randomid="$(head -4 /dev/urandom | tr -dc "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" | head -c4)"
+}
+
+detectwan() {
+	# Deteksi perangkat jaringan WAN yang akan digunakan untuk login
+	# Cek terlebih dahulu apakah menggunakan load-balance atau tidak, jika iya, maka:
+	if [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].loadbalance)" = "yes" ]]; then
+		# Dapatkan konfigurasi perangkat dari berkas konfigurasi
+		waninterface="$(uci -q get kopijahe.@autologin["$multiautologinnum"].waninterface)"
+	# Jika tidak, maka:
+	else
+		# Catat di konfigurasi bahwa tidak ada load-balance
+		uci set "kopijahe.@autologin[$multiautologinnum].loadbalance=no"
+		# Simpan konfigurasi
+		uci commit
+		# Bersihkan cache jaringan terlebih dahulu
+		network_flush_cache
+		# Cari tahu interface WAN yang digunakan
+		network_find_wan waninterface
+	fi
+	# Tentukan perangkat WAN yang digunakan sesuai dengan hasil di atas
+	wandevice="$(ifstatus "$waninterface" | jsonfilter -e '@["device"]')"
+	# Tentukan alamat IP yang digunakan sesuai dengan hasil di atas
+	iprouter="$(ifstatus "$waninterface" | jsonfilter -e '@["ipv4-address"][0].address')"
+}
+
+detecturl() {
+	# Fungsi deteksi URL halaman login
+	
+	# Deteksi URL login dengan cara melihat jawaban redirect dari halaman periksa koneksi
+	deteksi="$(curl -k -I --silent --interface "$wandevice" --max-redirs 1 --connect-timeout 10 "http://periksakoneksi.kopijahe.my.id/cek" | grep "Location")"
+	
+	# Jika gagal mendeteksi menggunakan teknik di atas, maka:
+	if [[ "$deteksi" = "" ]]; then
+		# Deteksi URL login dengan cara melihat URL landing di halaman redirect
+		urllanding="$(curl -k -I --silent --interface "$wandevice" --max-redirs 1 --connect-timeout 10 "http://periksakoneksi.kopijahe.my.id/cek" | grep URL | awk -F'[;]' '{print $2}' | head -c -3)"
+		deteksi=" Location: $urllanding"
+	fi
+	
+	# Jika masih saja gagal, maka:
+	if [[ "$deteksi" = "" ]]; then
+		urllanding="$(curl -k -I --silent --interface "$wandevice" --max-redirs 1 --connect-timeout 10 "http://periksakoneksi.kopijahe.my.id/cek" | grep URL | awk -F'[;]' '{print $2}' | head -c -3 | awk -F'[=]' '{print $2"="$3"="$4"="$5"="$6"="$7}')"
+		deteksi=" Location: $urllanding"
+	fi
+}
+
+setup() {
+	# Fungsi penyiapan berkas konfigurasi autologin
+	advancedmode="true"
+	
+	# Jika digunakan untuk login di jaringan "wifi.id-lanjutkan", maka:
+	if [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wifi.id-lanjutkan" ]]; then
+		# Deteksi tipe login (hasil "login" = wifi.id, hasil "wms" = wms)
+		tipelogin="$(echo "$deteksi" | awk -F'[=&]' '{print $1}' | awk -F'[=/]' '{print $4"/"$5}')"
+		# Deteksi variabel gw_id
+		gwid="$(echo "$deteksi" | awk -F'[=&]' '{print $2}')"
+		# Deteksi MAC address yang digunakan
+		clientmac="$(echo "$deteksi" | awk -F'[=&]' '{print $8}')"
+		# Deteksi variabel wlan_id
+		wlanid="$(echo "$deteksi" | awk -F'[=&]' '{print $6}')"
+		# Deteksi variabel session_id, filter hasilnya agar tidak ada error
+		session_id="$(echo "$deteksi" | awk -F'[=&]' '{print $10}' | tr -dc "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")"
+		# Deteksi variabel server_id
+		server_id="$(echo "$deteksi" | awk -F'[/]' '{print $3}')"
+	# Jika tidak, maka:
+	else
+		# Deteksi tipe login (hasil "login" = wifi.id, hasil "wms" = wms)
+		tipelogin="$(echo "$deteksi" | awk -F'[=&]' '{print $1}' | awk -F'[=/]' '{print $4}')"
+		# Deteksi variabel gw_id
+		gwid="$(echo "$deteksi" | awk -F'[=&]' '{print $2}')"
+		# Deteksi MAC address yang digunakan
+		clientmac="$(echo "$deteksi" | awk -F'[=&]' '{print $4}')"
+		# Deteksi variabel wlan_id
+		wlanid="$(echo "$deteksi" | awk -F'[=&]' '{print $6}')"
+		# Deteksi variabel session_id, filter hasilnya agar tidak ada error
+		session_id="$(echo "$deteksi" | awk -F'[=&]' '{print $8}' | tr -dc "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")"
+		# Deteksi variabel server_id
+		server_id="$(echo "$deteksi" | awk -F'[/]' '{print $3}')"
+	fi
+	
+	# Masukkan konfigurasi sesuai dengan hasil di atas dan sesuai dengan nomor konfigurasi multi-autologin
+	uci set kopijahe.@autologin["$multiautologinnum"].tipelogin="$tipelogin"
+	uci set kopijahe.@autologin["$multiautologinnum"].gwid="$gwid"
+	uci set kopijahe.@autologin["$multiautologinnum"].clientmac="$clientmac"
+	uci set kopijahe.@autologin["$multiautologinnum"].wlanid="$wlanid"
+	uci set kopijahe.@autologin["$multiautologinnum"].sessionid="$session_id"
+	uci set kopijahe.@autologin["$multiautologinnum"].serverid="$server_id"
+	
+	# Jika digunakan di jaringan WMS, maka tentukan variabel wms_id
+	if [[ "$tipelogin" = "wms" ]]; then
+		url_landing="$(echo "$deteksi" | awk -F'[ ]' '{print $2}')"
+		wms_id="$(echo "$url_landing" | xargs curl -k --silent -L --interface "$wandevice" | grep username_hidden | awk -F'[.]' '{print $4}' | awk '!a[$0]++' | tr -dc "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")"
+		uci set kopijahe.@autologin["$multiautologinnum"].wmsid="$wms_id"
+	fi
+	
+	# Simpan konfigurasi
+	uci commit kopijahe
+}
+
+loginblock() {
+	# Fungsi cek blokir login
+	# Buat berkas "/tmp/last.login.$waninterface" untuk menghindari error
+	touch "/tmp/last.login.$waninterface"
+	
+	# Jika di dalam berkas ditemukan hasil "Bloked IP", maka:
+	if [[ "$(grep -o "Blocked IP" "/tmp/last.login.$waninterface")" = "Blocked IP" ]]; then
+		# Tentukan bahwa IP diblokir
+		ipblocked=yes
+	# Jika tidak ditemukan, maka:
+	else
+		# Tentukan bahwa IP tidak diblokir
+		ipblocked=no
+	fi
+	
+	# Jika di dalam berkas ditemukan hasil "Gagal Login", maka:
+	if [[ "$(grep -o "Gagal Login" "/tmp/last.login.$waninterface")" = "Gagal Login" ]]; then
+		# Tentukan bahwa login diblokir
+		loginblocked=yes
+	# Jika tidak ditemukan, maka:
+	else
+		# Tentukan bahwa login tidak diblokir
+		loginblocked=no
+	fi
+}
+
+refreshinterface() {
+	# Matikan perangkat yang digunakan
+	ifconfig "$wandevice" down
+	# Hidupkan kembali perangkat yang digunakan
+	ifconfig "$wandevice" up
+	
+	# Cek apakah digunakan untuk load-balance dan mwan3 terpasang, jika benar, maka:
+	mwan3check
+	if [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].loadbalance)" = "yes" ]] && [[ "$checkmwan3" = "ok" ]]; then
+		# Hidupkan interface tanpa menggunakan mwan3
+		ifup "$waninterface"
+		# Hidupkan juga interface di mwan3
+		mwan3 ifup "$waninterface"
+	# Jika tidak, maka:
+	else
+		# Hidupkan interface tanpa menggunakan mwan3
+		ifup "$waninterface"
+	fi
+	# Reset kode status, supaya tidak terjadi pengulangan
+	kodestatus=""
+}
+
+releaseobtainnewip() {
+	# Fungsi meminta alamat IP baru
+	# Cari tahu PID dari layanan DHCP client (udhcpc) yang digunakan
+	udhcpcpid="$(cat /var/run/udhcpc-"$wandevice".pid)"
+	# Matikan layanan DHCP Client dengan parameter SIGUSR2
+	kill -SIGUSR2 "$udhcpcpid"
+	
+	refreshinterface
+}
+
+deviceclaimfailed() {
+	# Fungsi deteksi error "DEVICE_CLAIM_FAILED"
+	# Cek apakah muncul kode error di status interface
+	claimfailed="$(ifstatus "$waninterface" | jsonfilter -e '@["errors"][0].code')"
+	
+	# Jika muncul kode error "DEVICE_CLAIM_FAILED", maka:
+	if [[ "$claimfailed" = "DEVICE_CLAIM_FAILED" ]]; then
+		# Perbarui interface
+		refreshinterface
+	fi
+}
+
+sleeptimer() {
+	# Fungsi pengaturan waktu pengulangan autologin
+	
+	sleeptime="$(uci -q get kopijahe.@autologin["$multiautologinnum"].sleeptime)"
+	
+	# Jika konfigurasi tidak ditemukan, maka:
+	if [[ "$sleeptime" = "" ]]; then
+		# Masukkan konfigurasi bawaan pengulangan setiap 8 detik
+		uci set "kopijahe.@autologin[$multiautologinnum].sleeptime=8"
+		# Simpan konfigurasi
+		uci commit kopijahe
+		# Tentukan variabel sleeptime ke 8 detik
+		sleeptime="8"
+	fi
+}
+
+testing() {
+	advancedmode="true"
+	generaterandomid
+	versi
+	
+	openwrtversion="$(grep VERSION_ID /etc/os-release | awk -F'[=]' '{print $2}' | awk -F'["]' '{print $2}')"
+	systemmodel="$(grep "machine" /proc/cpuinfo | awk -F'[:]' '{print $2}' | cut -c2-)"
+	pskopijahe="$(ps | grep -c "kopijahe")"
+	numkopijahe="$((pskopijahe-3))"
+	
+	echo "Pengaturan autologin:"
+	echo ""
+	uci show kopijahe
+	echo ""
+	echo "Versi aplikasi: $ver"
+	echo "OpenWrt version: $openwrtversion"
+	echo "Device model: $systemmodel"
+	echo "Random ID: $randomid"
+	echo "Jumlah autologin berjalan: $numkopijahe"
+}
+
+cpctesting() {
+	# Mode testing penyedia jasa cek koneksi
+	cpcretry="1"
+	cpctimeout="1"
+	
+	echo "Tes penyedia jasa layanan cek koneksi"
+	cpcprovider="kopijahe"
+	captiveportalcheck
+	echo "KopiJahe: $cpcstatus"
+	cpcprovider="kopijahe2"
+	captiveportalcheck
+	echo "KopiJahe2: $cpcstatus"
+	cpcprovider="firefox"
+	captiveportalcheck
+	echo "Firefox: $cpcstatus"
+	cpcprovider="google"
+	captiveportalcheck
+	echo "Google: $cpcstatus"
+	cpcprovider="google2"
+	captiveportalcheck
+	echo "Google2: $cpcstatus"
+	cpcprovider="apple"
+	captiveportalcheck
+	echo "Apple: $cpcstatus"
+	cpcprovider="apple2"
+	captiveportalcheck
+	echo "Apple2: $cpcstatus"
+	cpcprovider="microsoft"
+	captiveportalcheck
+	echo "Microsoft: $cpcstatus"
+	cpcprovider="microsoft2"
+	captiveportalcheck
+	echo "Microsoft2: $cpcstatus"
+	cpcprovider="xiaomi"
+	captiveportalcheck
+	echo "Xiaomi: $cpcstatus"
+	cpcprovider="httpforever"
+	captiveportalcheck
+	echo "HTTPForever: $cpcstatus"
+	cpcprovider="neverssl"
+	captiveportalcheck
+	echo "NeverSSL: $cpcstatus"
+	cpcprovider="ubuntu"
+	captiveportalcheck
+	echo "Ubuntu: $cpcstatus"
+	cpcprovider="archlinux"
+	captiveportalcheck
+	echo "Arch Linux: $cpcstatus"
+	cpcprovider="examplecom"
+	captiveportalcheck
+	echo "example.com: $cpcstatus"
+}
+
+captiveportalcheck() {
+	# Fungsi cek captive portal (halaman login)
+	
+	# Cek apakah dalam mode testing atau tidak
+	if [[ "$advancedmode" != "true" ]]; then
+		# Tentukan penyedia layanan cek captive portal berdasarkan konfigurasi sebelumnya
+		cpcprovider="$(uci -q get kopijahe.@autologin["$multiautologinnum"].cpcprovider)"
+		# Jumlah percobaan ulang cek captive portal
+		cpcretry="$(uci -q get kopijahe.@autologin["$multiautologinnum"].cpcretry)"
+		# Lama timeout cek captive portal
+		cpctimeout="$(uci -q get kopijahe.@autologin["$multiautologinnum"].cpctimeout)"
+		# Penggunaan ping dalam cek koneksi
+		cpcuseping="$(uci -q get kopijahe.@autologin["$multiautologinnum"].cpcuseping)"
+	fi
+	
+	# Jika konfigurasi penyedia jasa cek koneksi tidak ditemukan, maka:
+	if [[ "$cpcprovider" = "" ]]; then
+		# Masukkan konfigurasi penyedia layanan KopiJahe sebagai penyedia layanan bawaan
+		uci set "kopijahe.@autologin[$multiautologinnum].cpcprovider=kopijahe"
+		# Simpan konfigurasi
+		uci commit kopijahe
+		# Tentukan variabel cpcprovider ke kopijahe
+		cpcprovider="kopijahe"
+	fi
+	
+	#	Jika konfigurasi jumlah pengulangan tidak ditemukan, maka:
+	if [[ "$cpcretry" = "" ]]; then
+		# Masukkan konfigurasi bawaan percobaan ulang ke 2 kali
+		uci set "kopijahe.@autologin[$multiautologinnum].cpcretry=2"
+		# Simpan konfigurasi
+		uci commit kopijahe
+		# Tentukan variabel cpcretry ke 2 kali
+		cpcretry="2"
+	fi
+	
+	# Jika konfigurasi timeout percobaan tidak ditemukan, maka:
+	if [[ "$cpctimeout" = "" ]]; then
+		# Masukkan konfigurasi bawaan timeout ke 3 detik
+		uci set "kopijahe.@autologin[$multiautologinnum].cpctimeout=3"
+		# Simpan konfigurasi
+		uci commit kopijahe
+		# Tentukan variabel cpcretry ke 3 detik
+		cpctimeout="3"
+	fi
+	
+	# Jika konfigurasi penggunaan ping dalam cek koneksi tidak ditemukan, maka:
+	if [[ "$cpcuseping" = "" ]]; then
+		# Masukkan konfigurasi bawaan penggunaan ping ke "true"
+		uci set "kopijahe.@autologin[$multiautologinnum].cpcuseping=true"
+		# Simpan konfigurasi
+		uci commit kopijahe
+		# Tentukan variabel cpcuseping ke "true"
+		cpcuseping="true"
+	fi
+	
+	# Daftar IP server DNS publik (untuk pengecekan cadangan menggunakan ping jika gagal mengecek menggunakan curl)
+	dnsgoogle='8.8.8.8'
+	dnsgoogle2='8.8.4.4'
+	dnsopendns='208.67.222.222'
+	dnsopendns2='208.67.220.220'
+	dnsquad9='9.9.9.9'
+	
+	# Daftar penyedia layanan cek captive portal beserta hasil cek yang diharapkan
+	# 
+	# KopiJahe: Layanan cek captive portal bawaan script
+	if [[ "$cpcprovider" = "kopijahe" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://periksakoneksi.kopijahe.my.id/cek")"
+		kodestatuslanding="$?"
+		hasil="OK"
+		dnsserver="$dnsopendns"
+	# KopiJahe2: Layanan cek captive portal alternatif bawaan script
+	elif [[ "$cpcprovider" = "kopijahe2" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://kopijahe.my.id/ok.txt")"
+		kodestatuslanding="$?"
+		hasil="OK"
+		dnsserver="$dnsopendns2"
+	# Firefox: Layanan cek captive portal bawaan browser Mozilla Firefox
+	elif [[ "$cpcprovider" = "firefox" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://detectportal.firefox.com/success.txt")"
+		kodestatuslanding="$?"
+		hasil="success"
+		dnsserver="$dnsopendns2"
+	# Google: Layanan cek captive portal bawaan sistem operasi android
+	elif [[ "$cpcprovider" = "google" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -LI --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://connectivitycheck.gstatic.com/generate_204" | grep -o "204")"
+		kodestatuslanding="$?"
+		hasil="204"
+		dnsserver="$dnsgoogle"
+	# Google2: Layanan cek captive portal bawaan chrome
+	elif [[ "$cpcprovider" = "google2" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -LI --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://clients3.google.com/generate_204" | grep -o "204")"
+		kodestatuslanding="$?"
+		hasil="204"
+		dnsserver="$dnsgoogle2"
+	# Apple: Layanan cek captive portal bawaan perangkat Apple
+	elif [[ "$cpcprovider" = "apple" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://captive.apple.com/" | grep -o "Success" | head -c8)"
+		kodestatuslanding="$?"
+		hasil="Success"
+		dnsserver="$dnsopendns"
+	# Apple2: Layanan cek captive portal alternatif perangkat Apple
+	elif [[ "$cpcprovider" = "apple2" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://www.apple.com/library/test/success.html" | grep -o "Success" | head -c8)"
+		kodestatuslanding="$?"
+		hasil="Success"
+		dnsserver="$dnsopendns2"
+	# Microsoft2: Layanan cek captive portal alternatif milik Microsoft
+	elif [[ "$cpcprovider" = "microsoft2" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://www.msftncsi.com/ncsi.txt")"
+		kodestatuslanding="$?"
+		hasil="Microsoft NCSI"
+		dnsserver="$dnsopendns"
+	# Microsoft: Layanan cek captive portal bawaan sistem operasi Windows
+	elif [[ "$cpcprovider" = "microsoft" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://www.msftconnecttest.com/connecttest.txt")"
+		kodestatuslanding="$?"
+		hasil="Microsoft Connect Test"
+		dnsserver="$dnsquad9"
+	# Xiaomi: Layanan cek captive portal bawaan sistem operasi MIUI
+	elif [[ "$cpcprovider" = "xiaomi" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -LI --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://connect.rom.miui.com/generate_204" | grep -o "204")"
+		kodestatuslanding="$?"
+		hasil="204"
+		dnsserver="$dnsquad9"
+	# HTTP Forever: Layanan cek captive portal dari Scott Helme (https://github.com/ScottHelme)
+	elif [[ "$cpcprovider" = "httpforever" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://httpforever.com/" | grep -o "A reliably insecure connection")"
+		kodestatuslanding="$?"
+		hasil="A reliably insecure connection"
+		dnsserver="$dnsgoogle"
+	# NeverSSL: Layanan cek captive portal dari Colm MacCÃ¡rthaigh (https://github.com/colmmacc/neverssl.com)
+	elif [[ "$cpcprovider" = "neverssl" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://neverssl.com/" | grep -o "helping you get online")"
+		kodestatuslanding="$?"
+		hasil="helping you get online"
+		dnsserver="$dnsopendns"
+	# Ubuntu: Layanan cek captive portal bawaan sistem operasi ubuntu
+	elif [[ "$cpcprovider" = "ubuntu" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -LI --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://connectivity-check.ubuntu.com" | grep -o "204")"
+		kodestatuslanding="$?"
+		hasil="204"
+		dnsserver="$dnsgoogle"
+	# Archlinux: Layanan cek captive portal bawaan sistem operasi archlinux
+	elif [[ "$cpcprovider" = "archlinux" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -LI --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://ping.archlinux.org" | grep -o "200")"
+		kodestatuslanding="$?"
+		hasil="200"
+		dnsserver="$dnsquad9"
+	# Example: Situs percobaan yang dikelola oleh IANA (https://www.iana.org/domains/reserved)
+	elif [[ "$cpcprovider" = "examplecom" ]]; then
+		cekkoneksi="$(curl --interface "$wandevice" -L --silent --retry $cpcretry --max-redirs 1 --connect-timeout $cpctimeout "http://example.com/" | grep -o "Example Domain" | awk '!a[$0]++')"
+		kodestatuslanding="$?"
+		hasil="Example Domain"
+		dnsserver="$dnsquad9"
+	fi
+	
+	# Jika hasil cek koneksi sesuai dengan hasil yang diharapkan, maka:
+	if [[ "$cekkoneksi" = "$hasil" ]]; then
+		# Tentukan bahwa terkoneksi dengan internet
+		internetconnected="yes"
+		cpcstatus="Sukses"
+	# Jika hasilnya tidak sama dan bukan mode tes penyedia jasa koneksi, maka:
+	elif [[ "$cekkoneksi" != "$hasil" ]] && [[ "$advancedmode" != "true" ]] && [[ "$cpcuseping" = "true" ]]; then
+		# Lakukan cek menggunakan ping terlebih dahulu ke dns server sesuai pilihan penyedia captive portal
+		cekkoneksiping="$(ping -I "$wandevice" -c $cpcretry $dnsserver)"
+		cekkoneksiping="$?"
+		# Jika ping berhasil, maka:
+		if [[ "$cekkoneksiping" = "0" ]]; then
+			# Tentukan bahwa terkoneksi dengan internet
+			internetconnected="yes"
+			cpcstatus="Sukses"
+		else
+			# Tentukan bahwa tidak terkoneksi dengan internet
+			internetconnected="no"
+			cpcstatus="Gagal"
+		fi
+	else
+		# Tentukan bahwa tidak terkoneksi dengan internet
+		internetconnected="no"
+		cpcstatus="Gagal"
+	fi
+
+	# Jika kode status hasil cek koneksi adalah 127, maka:
+	if [[ "$kodestatuslanding" = "127" ]]; then
+		# Beritahu pengguna bahwa CURL belum terpasang
+		echo "CURL belum terpasang" | logger -t "kopijahe $ver"
+		# Jika perangkat dalam keadaan terkoneksi ke internet, maka:
+		if [[ "$(ifstatus "$wandevice" | jsonfilter -e '@["up"]')" = "true" ]]; then
+			# Lakukan pembaruan daftar aplikasi
+			opkg update
+			# Lalu unduh dan instal CURL
+			opkg install curl
+		fi
+	fi
+}
+
+login_folder() {
+	# Fungsi penentuan folder dan url login
+	# Tentukan variabel server_id untuk dipakai nanti
+	server_id="$(uci -q get kopijahe.@autologin["$multiautologinnum"].serverid)"
+	# Jika tipe login adalah wifi.id, maka tentukan URL login yang sesuai:
+	if [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].tipelogin)" = "login" ]]; then
+		loginurl="https://$server_id/authnew/login/check_login.php"
+	# Jika tipe login adalah wms dan varian jaringan WICO, maka tentukan URL login yang sesuai:
+	elif [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].tipelogin)" = "wms" ]] && [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wico" ]]; then
+		loginurl="https://$server_id/wms/auth/authnew/autologin/quarantine.php"
+	# Jika tipe login adalah wms dan varian jaringan WMS-lanjutkan, maka tentukan URL login yang sesuai:
+	elif [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].tipelogin)" = "wms" ]] && [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wms-lanjutkan" ]]; then
+		loginurl="https://$server_id/wms/auth/authnew/autologin-free/quarantine.php"
+	# Jika tipe login adalah wms dan varian jaringan wifi.id-lanjutkan, maka tentukan URL login yang sesuai:
+	elif [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wifi.id-lanjutkan" ]] || [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "pegadaian" ]]; then
+		loginurl="https://$server_id/authnew/login-free/check_login.php"
+	# Jika tipe login adalah wms, maka tentukan URL login yang sesuai:
+	elif [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].tipelogin)" = "wms" ]]; then
+		loginurl="https://$server_id/wms/auth/authnew/login/check_login.php"
+	else
+	# Jika tipe login tidak diketahui, maka konfigurasi masih belum lengkap, silahkan ulangi deteksi otomatis jaringan
+		echo "Ada kesalahan konfigurasi jaringan"
+	fi
+}
+
+wplanjutkan() {
+	# Fungsi mencari username dan password untuk sistem "lanjutkan"
+	
+	# Tentukan url landing
+	urllanding="https://""$server_id""/""$tipelogin""/?gw_id=""$gwid""&client_mac=""$clientmac""&wlan=""$wlanid""&sessionid=""$session_id"""
+	
+	# Unduh halaman landing
+	wp="$(curl --interface "$wandevice" "$curladditionalparameter" "$urllanding")"
+	
+	# Cari username
+	if [[ "$wifivariant" = "wms-lanjutkan" ]] || [[ "$wifivariant" = "pegadaian" ]]; then
+		username2="$(echo "$wp" | grep username | grep username | awk -F'[=]' '{print $2}' | awk -F '[&]' '{print $1}')"		
+	else
+		username2="pass-$clientmac@wms.00000000.000"
+	fi
+	
+	# Cari password
+	password_lanjutkan="$(echo "$wp" | grep username | grep username | awk -F'[=]' '{print $3}' | awk -F '[&]' '{print $1}' | sed s/\'//g | sed s/\,//g)"
+}
+
+wificommunity() {
+	# Tentukan akhiran username sesuai dengan varian jaringan yang dipilih:
+	#
+	# Jika smartbisnis, maka:
+	if [[ "$wifivariant" = "smartbisnis" ]]; then
+		# Tentukan akhiran username "@com.smartbisnis"
+		username2="$username@com.smartbisnis"
+	# Jika kampus:
+	elif [[ "$wifivariant" = "kampus" ]]; then
+		# Tentukan akhiran username sesuai dengan konfigurasi kampus yang tersimpan
+		cfgkampus="$(uci -q get kopijahe.@autologin["$multiautologinnum"].kampus)"
+		
+		# Hindari error karena penulisan akun kampus tidak ditulis NIM saja
+		username="$(echo "$username" | awk -F'[@]' '{print $1}')"
+		
+		# Jika digunakan untuk akun UT, maka:
+		if [[ "$cfgkampus" = "ut.ac.id" ]]; then
+			# Akun UT punya format berbeda dibandingkan dengan kampus lainnya
+			kampus="$(echo "$cfgkampus" | awk -F'[.]' '{print $1}')"
+			username2="$username@$cfgkampus@com.$kampus"
+		elif [[ "$cfgkampus" = "adibuana" ]]; then
+			# Akun Adibuana mengikuti format komunitas generik
+			username2="$username@$cfgkampus.vmgmt@wms.00000000.000"
+		# Jika bukan akun UT dan adibuana, maka:
+		else
+			# Gunakan format standard
+			# Termasuk akun kampus dengan akhiran: "@itdel", "@polije", "@umaha", "@unej", "@unsiq"
+			username2="$username@com.$cfgkampus"
+		fi
+	# Jika WMS Lite, maka:
+	elif [[ "$wifivariant" = "wms-lite" ]] || [[ "$wifivariant" = "wmslite" ]]; then
+		generaterandomid
+		# Tentukan akhiran username login untuk jaringan WMS Lite
+		wmsid="$(uci -q get kopijahe.@autologin["$multiautologinnum"].wmsid)"
+		username3="@wmslite.$wmsid"
+	# Jika WMS, maka:
+	elif [[ "$wifivariant" = "wms" ]]; then
+		generaterandomid
+		# Tentukan akhiran username login untuk jaringan WMS
+		wmsid="$(uci -q get kopijahe.@autologin["$multiautologinnum"].wmsid)"
+		username3="@wms.$wmsid.000"
+	# Jika WICO, maka:
+	elif [[ "$wifivariant" = "wico" ]]; then
+		# Tentukan akhiran username "@violet"
+		username2="$username@violet"
+	# Jika wifi.id, maka:
+	elif [[ "$wifivariant" = "wifi.id" ]] || [[ "$wifivariant" = "@wifi.id" ]]; then
+		# Periksa apakah akun yang digunakan adalah akun violet, jika iya, maka:
+		if [[ "$(echo "$username" | awk -F'[@]' '{print $2}')" = "violet" ]]; then
+			# Tidak perlu diberi tambahan akhiran
+			username2="$username"
+		# Jika tidak, maka:
+		else
+			# Beri tambahan akhiran "@spin2"
+			username2="$username@spin2"
+		fi
+	# Jika grosirbersama, maka:
+	elif [[ "$wifivariant" = "grosirbersama" ]]; then
+		# Tentukan akhiran username "@com.grosirbersama"
+		username2="$username@com.grosirbersama"
+	# Jika internetku, maka:
+	elif [[ "$wifivariant" = "internetku" ]]; then
+		# Tentukan akhiran username "@com.internetku"
+		username2="$username@com.internetku"
+	# Jika gift, maka:
+	elif [[ "$wifivariant" = "gift" ]]; then
+		# Tidak perlu merubah akhiran username
+		username2="$username"
+	# Jika starwifi, maka:
+	elif [[ "$wifivariant" = "starwifi" ]]; then
+		# Tidak perlu merubah akhiran username
+		username2="$username.starwifi@event"
+	# Jika SSO atau Rumah Sakit atau komunitas generik lainnya, maka:
+	elif [[ "$wifivariant" = "sso" ]] || [[ "$wifivariant" = "rumah-sakit" ]] || [[ "$wifivariant" = "komunitas-generik" ]]; then
+		# Tentukan akhiran username ".vmgmt@wms.00000000.000"
+		username2="$username.vmgmt@wms.00000000.000"
+	# Jika "lanjutkan", maka:
+	elif [[ "$wifivariant" = "wms-lanjutkan" ]] || [[ "$wifivariant" = "wifi.id-lanjutkan" ]] || [[ "$wifivariant" = "pegadaian" ]]; then
+		# Jalankan fungsi wplanjutkan untuk mencari nilai username dan password
+		wplanjutkan
+	fi
+}
+
+dataraw() {
+	# Jika digunakan untuk jaringan WMS atau WMS Lite, maka:
+	if [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wms" ]] || [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wms-lite" ]]; then
+		login_cred="username_=""$username2""&autologin_time=86000&username=""$username"".""$randomid""$username3""&password=""$password"""
+	# Jika digunakan untuk jaringan WICO, maka:
+	elif [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wico" ]]; then
+		login_cred="username_=""$username""&username=""$username2""&password=""$password"""
+	# Jika digunakan untuk jaringan "lanjutkan", maka:
+	elif [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wms-lanjutkan" ]] || [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "wifi.id-lanjutkan" ]] || [[ "$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)" = "pegadaian" ]]; then
+		login_cred="username=""$username2""&password=""$password_lanjutkan""&autologin_time="
+	# Jika digunakan untuk jaringan lain, maka:
+	else
+		login_cred="username=""$username2""&password=""$password"""
+	fi
+}
+
+welcomepageloadtime() {
+	# Fungsi mencari nilai dari "load_wp"
+	
+	# Tentukan url landing
+	urllanding="https://""$server_id""/""$tipelogin""/?gw_id=""$gwid""&client_mac=""$clientmac""&wlan=""$wlanid""&sessionid=""$session_id"""
+	
+	# Unduh halaman landing
+	wp="$(curl --interface "$wandevice" --retry 1 --connect-timeout 10 "$curladditionalparameter" "$urllanding")"
+	
+	# Cari dan kalkulasi nilai parameter "load_wp"
+	loadwp_value="$(echo "$wp" | grep load_time | awk -F'[=]' '{print $2}' | sed s/\'//g | sed s/\"//g | head -n 1 | awk -F '[*]' '{print $1*10000}')"
+}
+
+hasil_loginout() {
+	# Fungsi output hasil login dan logout
+
+	# Filter hasil hanya di bagian yang relevan saja sesuai dengan fungsi yang digunakan
+	if [[ "$function" = "login" ]]; then
+		loginout="$(echo "$attempt" | jsonfilter -e '@["message"]' 2> /dev/null)"
+	elif [[ "$function" = "logout" ]]; then
+		loginout="$(echo "$attempt" | awk -F'[<>]' '{print $5}' 2> /dev/null)"
+	fi
+
+	# Jika variabel hasil kosong, maka login tidak berhasil
+	# Cek apakah mode bypass (parameter -z) hidup, jika tidak, maka:
+	if [[ "$loginout" = "" ]] && [[ "$bypassmode" = "" ]]; then
+		# Laporkan hasil login tidak berhasil, berikut kode status CURL untuk halaman login/landing dan percobaan login
+		loginout="$function tidak berhasil, kode status CURL: $kodestatuslanding & $kodestatus"
+	elif [[ "$loginout" = "" ]] && [[ "$bypassmode" = "true" ]]; then
+		# Laporkan hasil login tidak berhasil, berikut kode status CURL untuk percobaan login
+		loginout="$function tidak berhasil, kode status CURL: $kodestatus"
+	fi
+	
+	# Jika digunakan di mode lanjutan, maka:
+	if [[ "$advancedmode" = "true" ]]; then
+		# Beritahu pengguna melalui layar terminal/stdout
+		echo "Percobaan $function. Interface: $waninterface. Hasil: $loginout"
+		# Simpan juga hasilnya di berkas "/tmp/last.login.$waninterface" dan beritahu pengguna melalui System Log
+		echo "Percobaan $function. Interface: $waninterface. Hasil: $loginout" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+	# Jika tidak, maka:
+	else
+		# Simpan hasilnya di berkas "/tmp/last.login.$waninterface" dan beritahu pengguna melalui System Log
+		echo "Percobaan $function. Interface: $waninterface. Hasil: $loginout" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+	fi
+	
+	# Jika kode status hasil login adalah 3, maka:
+	if [[ "$function" = "login" ]] && [[ "$kodestatus" = "3" ]]; then
+		# Beritahu pengguna bahwa pengaturan belum lengkap lewat stdout dan System log jika melalui mode lanjutan
+		if [[ "$advancedmode" = "true" ]]; then
+			echo "Pengaturan belum lengkap, silahkan ulangi konfigurasi"
+			echo "Pengaturan belum lengkap, silahkan ulangi konfigurasi" | logger -t "kopijahe $ver"
+		# Jika tidak, maka beritahu pengguna lewat System Log saja
+		else
+			echo "Pengaturan belum lengkap, silahkan ulangi konfigurasi" | logger -t "kopijahe $ver"
+		fi
+	fi
+}
+
+logout_wifi() {
+	# Fungsi login dari pengaturan yang disimpan
+	
+	# Simpan jam dan tanggal saat ini
+	date > "/tmp/last.login.$waninterface"
+	# Cek versi OS, jika menggunakan LEDE 17.01 atau OpenWrt 18.06
+	# Maka perlu menggunakan tambahan parameter -k
+	if [[ "$osversion" = "17" ]] || [[ "$osversion" = "18" ]]; then
+		curladditionalparameter='-k --silent'
+	else
+		curladditionalparameter='--silent'
+	fi
+	
+	login_folder
+	versi
+	
+	# Lakukan login sesuai dengan parameter konfigurasi autologin
+	attempt="$(curl --interface "$wandevice" $curladditionalparameter """https://$server_id/authnew/logout/logoutx.php""" \
+	-H "authority: ""$server_id""" \
+	-H "accept: application/json, text/javascript, */*; q=0.01" \
+	-H "x-requested-with: XMLHttpRequest" \
+	-H "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4315.5 Safari/537.36" \
+	-H "content-type: application/x-www-form-urlencoded; charset=UTF-8" \
+	-H "origin: https://logout.wifi.id" \
+	-H "sec-fetch-site: same-site" \
+	-H "sec-ch-ua-platform: Windows" \
+	-H "sec-fetch-mode: cors" \
+	-H "sec-fetch-dest: empty" \
+	-H "referer: https://logout.wifi.id/")"
+	
+	kodestatus="$?"
+	function="logout"
+	hasil_loginout
+}
+
+login_wifi() {
+	# Fungsi login dari pengaturan yang disimpan
+	
+	# Simpan jam dan tanggal saat ini
+	date > "/tmp/last.login.$waninterface"
+	
+	# Cek versi OS, jika menggunakan LEDE 17.01 atau OpenWrt 18.06
+	# Maka perlu menggunakan tambahan parameter -k
+	if [[ "$osversion" = "17" ]] || [[ "$osversion" = "18" ]]; then
+		curladditionalparameter='-k --silent'
+	else
+		curladditionalparameter='--silent'
+	fi
+	
+	login_folder
+	randommaccheck
+	versi
+	username="$(uci -q get kopijahe.@autologin["$multiautologinnum"].username)"
+	username2="$(echo "$username" | awk -F'[@]' '{print $1}')"
+	password="$(uci -q get kopijahe.@autologin["$multiautologinnum"].password)"
+	tipelogin="$(uci -q get kopijahe.@autologin["$multiautologinnum"].tipelogin)"
+	gwid="$(uci -q get kopijahe.@autologin["$multiautologinnum"].gwid)"
+	wlanid="$(uci -q get kopijahe.@autologin["$multiautologinnum"].wlanid)"
+	session_id="$(uci -q get kopijahe.@autologin["$multiautologinnum"].sessionid)"
+	wifivariant="$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)"
+	wificommunity
+	dataraw
+	welcomepageloadtime
+	
+	# Lakukan login sesuai dengan parameter konfigurasi autologin
+	attempt="$(curl --interface "$wandevice" $curladditionalparameter """$loginurl""?ipc=""$iprouter""&gw_id=""$gwid""&client_mac=""$clientmac""&redirect=&wlan=""$wlanid""&load_wp=""$loadwp_value""" \
+	-H "authority: ""$server_id""" \
+	-H "accept: application/json, text/javascript, */*; q=0.01" \
+	-H "x-requested-with: XMLHttpRequest" \
+	-H "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4315.5 Safari/537.36" \
+	-H "content-type: application/x-www-form-urlencoded; charset=UTF-8" \
+	-H "origin: https://""$server_id""" \
+	-H "sec-fetch-site: same-origin" \
+	-H "sec-ch-ua-platform: Windows" \
+	-H "sec-fetch-mode: cors" \
+	-H "sec-fetch-dest: empty" \
+	-H "referer: https://""$server_id""/""$tipelogin""/?gw_id=""$gwid""&client_mac=""$clientmac""&wlan=""$wlanid""&sessionid=""$session_id""" \
+	--data-raw "$login_cred")"
+	
+	kodestatus="$?"
+	function="login"
+	hasil_loginout
+}
+
+login_file() {
+	# Fungsi login dari berkas tangkapan curl Google Chrome
+	# (untuk jaringan wifi selain yang didukung di atas)
+	advancedmode="true"
+	loginfromfile="true"
+	loginwifi=/tmp/login_file.txt
+
+	while [[ "$loginfromfile" = "true" ]]; do
+	# Cek nomor pengaturan terlebih dahulu
+	multiautologin
+	# Deteksi antarmuka jaringan yang dipakai
+	detectwan
+	# Cek kondisi antarmuka jaringan yang dipakai
+	deviceclaimfailed
+	# Deteksi status koneksi
+	captiveportalcheck
+	# Cek apakah login sebelumnya diblokir atau tidak
+	loginblock
+	# Buat 4 karakter acak untuk keperluan login WMS
+	generaterandomid
+	# Cek pengaturan waktu pengulangan
+	sleeptimer
+
+	# Jika hasil cek koneksi internet tidak berhasil, maka:
+	if [[ "$internetconnected" = "no" ]]; then
+		# Cek terlebih dahulu apakah login diblokir atau "koneksi bengong" (kode status CURL error 7)
+		# Jika benar, maka:
+		if [[ "$loginblocked" = "yes" ]]; then
+			# Catat jam dan tanggal saat ini di berkas "/tmp/last.login.$waninterface"
+			date > "/tmp/last.login.$waninterface"
+			# Catat percobaan login terakhir di berkas "/tmp/last.login.$waninterface"
+			echo "Percobaan login terakhir:" >> "/tmp/last.login.$waninterface"
+			# Beritahu pengguna bahwa koneksi dengan internet terputus
+			echo "Koneksi $waninterface terputus, meminta alamat IP baru" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+			# Minta penggantian alamat IP
+			releaseobtainnewip
+			sleep "$sleeptime"
+		# Jika tidak, maka:
+		else
+			# Catat jam dan tanggal saat ini di berkas "/tmp/last.login.$waninterface"
+			date > "/tmp/last.login.$waninterface"
+			# Catat percobaan login terakhir di berkas "/tmp/last.login.$waninterface"
+			echo "Percobaan login terakhir:" >> "/tmp/last.login.$waninterface"
+			# Beritahu pengguna bahwa koneksi dengan internet terputus
+			echo "Koneksi $waninterface terputus, meminta alamat IP baru" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+			# Gandakan berkas tangkapan login CURL ke tempat proses
+			cp "$loginfiletxt" "$loginwifi"
+			# Proses berkas autologin
+			# Cek versi OS, jika menggunakan LEDE 17.01 atau OpenWrt 18.06
+			# Maka perlu menggunakan tambahan parameter -k
+			if [[ "$osversion" = "17" ]] || [[ "$osversion" = "18" ]]; then
+				sed -i "s/curl/curl -k --silent --interface $wandevice/g" "$loginwifi"
+			else
+				sed -i "s/curl/curl --silent --interface $wandevice/g" "$loginwifi"
+			fi
+			sed -i "s/iprouter/$iprouter/g" "$loginwifi"
+			sed -i "s/kopijahe/$randomid/g" "$loginwifi"
+			# Beri izin eksekusi berkas autologin
+			chmod +x "$loginwifi"
+			# Lakukan login, lalu simpan hasilnya di berkas "/tmp/last.login.$waninterface" dan beritahu pengguna melalui System Log
+			echo "Percobaan login interface: $waninterface" | logger -t "kopijahe $ver"
+			$loginwifi | jsonfilter -e '@["message"]' 2> /dev/null | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+		fi
+	fi
+	# Istirahat sebelum coba mengecek koneksi kembali
+	sleep "$sleeptime"
+	done
+}
+
+seamless_reconnect() {
+	# Fungsi mode reconnect seamless
+	advancedmode="true"
+	seamlessreconnectmode="true"
+	
+	while [[ "$seamlessreconnectmode" = "true" ]]; do
+	multiautologin
+	detectwan
+	captiveportalcheck
+	deviceclaimfailed
+	sleeptimer
+	
+	# Jika hasil cek koneksi internet tidak berhasil, maka:
+	if [[ "$internetconnected" = "no" ]]; then
+		# Catat jam dan tanggal saat ini di berkas "/tmp/last.login.$waninterface"
+		date > "/tmp/last.login.$waninterface"
+		# Catat status koneksi terakhir di berkas "/tmp/last.login.$waninterface"
+		echo "Status koneksi terakhir:" >> "/tmp/last.login.$waninterface"
+		# Beritahu pengguna bahwa koneksi dengan internet terputus
+		echo "Koneksi seamless di $waninterface terputus, meminta alamat IP baru" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+		# Minta penggantian alamat IP
+		releaseobtainnewip
+		# Tambahan istirahat sebelum mengecek ulang
+		# sambil menunggu koneksi hidup kembali
+		sleep "$sleeptime"
+	fi
+	# Istirahat sebelum coba mengecek koneksi kembali
+	sleep "$sleeptime"
+	done
+}
+
+# Fungsi mendapatkan parameter aplikasi
+while getopts :abc:df:hkil:m:op:stu:v:w:xz flags
+do
+	case "${flags}" in
+		a)
+			multiautologin
+			detectwan
+			detecturl
+			setup
+			;;
+		b)
+			update
+			;;
+		c)
+			icpcprovider="$OPTARG"
+			advancedmode="true"
+			multiautologin
+			if [[ "$icpcprovider" = "kopijahe" ]] || [[ "$icpcprovider" = "kopijahe2" ]] || [[ "$icpcprovider" = "firefox" ]] || [[ "$icpcprovider" = "google" ]] || [[ "$icpcprovider" = "google2" ]] || [[ "$icpcprovider" = "apple" ]] || [[ "$icpcprovider" = "apple2" ]] || [[ "$icpcprovider" = "microsoft" ]] || [[ "$icpcprovider" = "microsoft2" ]] || [[ "$icpcprovider" = "xiaomi" ]] || [[ "$icpcprovider" = "httpforever" ]] || [[ "$icpcprovider" = "neverssl" ]] || [[ "$icpcprovider" = "ubuntu" ]] || [[ "$icpcprovider" = "archlinux" ]] || [[ "$icpcprovider" = "examplecom" ]]; then
+				uci set kopijahe.@autologin["$multiautologinnum"].cpcprovider="$icpcprovider"
+				uci commit kopijahe
+			elif [[ "$icpcprovider" = "test" ]]; then
+				detectwan
+				cpctesting
+				exit 0
+			else
+				echo "Penyedia layanan yang didukung:"
+				echo "\"kopijahe\" (default), \"kopijahe2\", \"firefox\", \"google\", \"google2\", \"apple\", \"apple2\", \"microsoft\", \"microsoft2\", \"xiaomi\", \"httpforever\", \"neverssl\", \"ubuntu\", \"archlinux\", \"examplecom\""
+				echo ""
+				echo "Untuk menguji penyedia layanan yang bisa dipakai, bisa menggunakan -c test"
+				exit 1
+			fi
+			;;
+		d)
+			multiautologin
+			detectwan
+			echo "Silahkan masukkan URL halaman landing:"
+			read -r "urllanding"
+			deteksi=" Location: $urllanding"
+			setup
+			;;
+		f)
+			loginfiletxt="$OPTARG"
+			login_file
+			;;
+		h)
+			bantuan
+			;;
+		i)
+			install
+			;;
+		k)
+			killkopijahe
+			;;
+		l)
+			loadbalance="$OPTARG"
+			advancedmode="true"
+			multiautologin
+			if [[ "$loadbalance" = "yes" ]] || [[ "$loadbalance" = "no" ]]; then
+				uci set kopijahe.@autologin["$multiautologinnum"].loadbalance="$loadbalance"
+				uci commit kopijahe
+			else
+				echo "hanya menerima jawaban 'yes' atau 'no'"
+				exit 1
+			fi
+			if [[ "$loadbalance" = "yes" ]]; then
+				echo "Silahkan tentukan interface yang digunakan (misal: wwan, wwan1):"
+				read -r "lbinterface"
+				waninterface="$(echo "$lbinterface" | tr -dc "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")"
+				uci set kopijahe.@autologin["$multiautologinnum"].waninterface="$waninterface"
+				uci commit kopijahe
+			fi
+			;;
+		m)
+			inputmultiautologin="$OPTARG"
+			;;
+		o)
+			advancedmode="true"
+			bypassmode="true"
+			multiautologin
+			detectwan
+			logout_wifi
+			;;
+		p)
+			password="$OPTARG"
+			advancedmode="true"
+			multiautologin
+			# Hindari error karena pengguna menuliskan simbol "<" dan ">"
+			password="$(echo "$password" | sed 's/<//g' | sed 's/>//g')"
+			uci set kopijahe.@autologin["$multiautologinnum"].password="$password"
+			uci commit kopijahe
+			;;
+		s)
+			seamless_reconnect
+			;;
+		t)
+			testing
+			;;
+		u)
+			username="$OPTARG"
+			advancedmode="true"
+			multiautologin
+			# Hindari error karena pengguna menuliskan simbol "<" dan ">"
+			username="$(echo "$username" | sed 's/<//g' | sed 's/>//g')"
+			uci set kopijahe.@autologin["$multiautologinnum"].username="$username"
+			uci commit kopijahe
+			;;
+		v)
+			wifivariant="$OPTARG"
+			advancedmode="true"
+			multiautologin
+			if [[ "$wifivariant" = "wifi.id" ]] || [[ "$wifivariant" = "wifi.id-lanjutkan" ]] || [[ "$wifivariant" = "@wifi.id" ]] || [[ "$wifivariant" = "wms" ]] || [[ "$wifivariant" = "wms-lanjutkan" ]] || [[ "$wifivariant" = "wms-lite" ]] || [[ "$wifivariant" = "smartbisnis" ]] || [[ "$wifivariant" = "kampus" ]] || [[ "$wifivariant" = "sso" ]] || [[ "$wifivariant" = "rumah-sakit" ]] || [[ "$wifivariant" = "wico" ]] || [[ "$wifivariant" = "grosirbersama" ]] || [[ "$wifivariant" = "internetku" ]] || [[ "$wifivariant" = "gift" ]] || [[ "$wifivariant" = "starwifi" ]] || [[ "$wifivariant" = "komunitas-generik" ]] || [[ "$wifivariant" = "pegadaian" ]]; then
+				uci set kopijahe.@autologin["$multiautologinnum"].wifivariant="$wifivariant"
+			else
+				echo "Varian jaringan yang didukung:"
+				echo "\"wifi.id\", \"wifi.id-lanjutkan\", \"wms\", \"wms-lanjutkan\", \"wms-lite\", \"kampus\", \"smartbisnis\", \"sso\", \"rumah-sakit\", \"wico\", \"grosirbersama\", \"internetku\", \"gift\", \"starwifi\", \"komunitas-generik\", \"pegadaian\""
+				exit 1
+			fi
+			if [[ "$wifivariant" = "kampus" ]]; then
+				echo "Silahkan masukkan nama kampus anda (misal: \"ut.ac.id\", \"unsiq\", \"trisakti\", \"adibuana\")"
+				read -r kampus
+				kampus="$(echo "$kampus" | tr -dc "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.")"
+				uci set kopijahe.@autologin["$multiautologinnum"].kampus="$kampus"
+			fi
+			uci commit kopijahe
+			;;
+		w)
+			isleeptime="$OPTARG"
+			sleeptime="$(echo "$isleeptime" | tr -dc "0123456789")"
+			advancedmode="true"
+			multiautologin
+			uci set "kopijahe.@autologin[$multiautologinnum].sleeptime=$sleeptime"
+			uci commit kopijahe
+			;;
+		x)
+			set -x
+			;;
+		z)
+			advancedmode="true"
+			bypassmode="true"
+			versi
+			multiautologin
+			detectwan
+			login_wifi
+			;;
+		\?)
+			bantuan
+			;;
+		:)
+			echo "perintah tidak diketahui atau salah"
+			exit 1
+			;;
+		*)
+			;;
+	esac
+done
+
+# Cek versi sistem operasi terlebih dahulu
+osversioncheck
+# Cek apakah perangkat tidak punya MAC tetap
+detectrandommac="$(dmesg | grep 'generated random MAC address')"
+
+# Fungsi autologin
+# Deteksi apakah variabel advancedmode hidup, jika tidak, maka lakukan autologin:
+while [[ "$advancedmode" = "" ]]; do
+	# Cek nomor pengaturan terlebih dahulu
+	multiautologin
+	# Deteksi antarmuka jaringan yang dipakai
+	detectwan
+	# Cek kondisi antarmuka jaringan yang dipakai
+	deviceclaimfailed
+	# Deteksi status koneksi
+	captiveportalcheck
+	# Cek apakah login sebelumnya diblokir atau tidak
+	loginblock
+	# Cek pengaturan waktu pengulangan
+	sleeptimer
+	
+	# Jika hasil cek koneksi internet tidak berhasil, maka:
+	if [[ "$internetconnected" = "no" ]]; then
+		# Cek dulu varian jaringan yang digunakan:
+		wifivariant="$(uci -q get kopijahe.@autologin["$multiautologinnum"].wifivariant)"
+		
+		# Cek apakah IP diblokir,
+		# Jika benar, maka:
+		if [[ "$ipblocked" = "yes" ]]; then
+			# Catat jam dan tanggal saat ini di berkas "/tmp/last.login.$waninterface"
+			date > "/tmp/last.login.$waninterface"
+			# Catat percobaan login terakhir di berkas "/tmp/last.login.$waninterface"
+			echo "Percobaan login terakhir:" >> "/tmp/last.login.$waninterface"
+			# Beritahu pengguna bahwa koneksi dengan internet terputus
+			echo "Login di interface $waninterface diblokir, alasan: $loginout" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+			# Logout terlebih dahulu supaya akun tidak tersangkut di server
+			logout_wifi
+			# Minta penggantian alamat IP
+			releaseobtainnewip
+			# Istirahat sebelum coba mengecek koneksi kembali
+			sleep "$sleeptime"
+		# Cek apakah login diblokir dan tidak menggunakan akun smartbisnis ataupun kampus,
+		# Jika benar, maka:
+		elif [[ "$loginblocked" = "yes" ]] && [[ "$wifivariant" != "smartbisnis" ]] && [[ "$wifivariant" != "kampus" ]]; then
+			# Catat jam dan tanggal saat ini di berkas "/tmp/last.login.$waninterface"
+			date > "/tmp/last.login.$waninterface"
+			# Catat percobaan login terakhir di berkas "/tmp/last.login.$waninterface"
+			echo "Percobaan login terakhir:" >> "/tmp/last.login.$waninterface"
+			# Beritahu pengguna bahwa koneksi dengan internet terputus
+			echo "Login di interface $waninterface diblokir, alasan: $loginout" | tee -a "/tmp/last.login.$waninterface" | logger -t "kopijahe $ver"
+			# Logout terlebih dahulu supaya akun tidak tersangkut di server
+			logout_wifi
+			# Minta penggantian alamat IP
+			releaseobtainnewip
+			# Istirahat sebelum coba mengecek koneksi kembali
+			sleep "$sleeptime"
+		# Jika interface tidak terdeteksi atau mendapat kode status cURL 7, maka:
+		elif [[ "$kodestatus" = "45" ]] || [[ "$kodestatus" = "7" ]]; then
+			# Coba refresh interface terlebih dahulu
+			refreshinterface
+			# Istirahat sebelum coba mengecek koneksi kembali
+			sleep "$sleeptime"
+		# Jika terdeteksi cURL 0 & 7, maka:
+		elif [[ "$kodestatuslanding" = "0" ]] && [[ "$kodestatus" = "7" ]]; then
+			# Coba refresh interface terlebih dahulu
+			refreshinterface
+			# Tunggu selama 3 detik sebelum lanjut
+			sleep 3
+			# Lakukan login, lalu langsung cek status kembali
+			login_wifi
+		# Jika terdeteksi cURL 6 & 7, maka:
+		elif [[ "$kodestatuslanding" = "6" ]] && [[ "$kodestatus" = "7" ]]; then
+			# Coba refresh interface terlebih dahulu
+			refreshinterface
+		# Jika status user sedang aktif padahal tidak ada koneksi internet, maka:
+		# Jika interface terdeteksi tidak memiliki IP (mendapat 2 kode status cURL 28), maka:
+		elif [[ "$kodestatus" = "28" ]] && [[ "$kodestatuslanding" = "28" ]]; then
+			# Coba refresh interface terlebih dahulu
+			refreshinterface
+			# Istirahat sebelum coba mengecek koneksi kembali
+			sleep "$sleeptime"
+		# Jika status user sedang aktif padahal tidak ada koneksi internet, maka:
+		elif [[ "$loginout" = "Gagal Login (User Anda Sedang Aktif)" ]]; then
+			# Coba logout terlebih dahulu
+			logout_wifi
+			# Lalu coba login kembali
+			login_wifi
+			# Istirahat sebelum mencoba kembali
+			sleep "$sleeptime"
+		# Jika status SSID tidak sesuai padahal sebenarnya sudah sesuai di jaringan WMS, maka:
+		elif [[ "$loginout" = "Login Gagal (SSID Tidak Sesuai)" ]] && [[ "$wifivariant" = "wms" ]]; then
+			# Coba logout terlebih dahulu
+			logout_wifi
+			# Lalu minta penggantian alamat IP
+			releaseobtainnewip
+			# Lalu coba login kembali
+			login_wifi
+			# Jika masih dan router tidak memiliki MAC tetap, maka:
+			if [[ "$loginout" = "Login Gagal (SSID Tidak Sesuai)" ]] && [[ "$detectrandommac" != "" ]]; then
+				# Reboot router supaya menggunakan MAC lain
+				reboot
+			fi
+			# Istirahat sebelum mencoba kembali
+			sleep "$sleeptime"
+		# Jika login sebelumnya tidak diblokir, maka:
+		else
+			login_wifi
+			sleep "$sleeptime"
+		fi
+	else
+		# Istirahat sebelum coba mengecek koneksi kembali
+		sleep "$sleeptime"
+	fi
+done
